@@ -1,0 +1,114 @@
+trigger:
+  - none  # Change this to your desired branch
+
+pool:
+#  use the Microsoft-host agent 
+   vmImage: 'ubuntu-latest'
+
+#  use the self-hosted agent 
+#   name: Default
+  
+variables:
+  terraformVersion: 'latest'  # Change to your required Terraform version
+  workingDirectory: 'terraform'  # Adjust to your Terraform directory
+  backendAzureRmResourceGroup: 'serena-tf-rg'
+  backendAzureRmStorageAccount: 'serenatfstorage0207'
+  backendAzureRmContainer: 'tfstate'
+  backendAzureRmKey: 'terraform.tfstate'  
+  deployRG: 'myTFResourceGroup'
+  deployLA: 'myTFlogicapp-test0112-serena'  
+ 
+stages:
+- stage: Build
+  displayName: 'Build Artifact'
+  jobs:
+  - job: Build_Artifact
+    displayName: "Build and Publish Artifact"
+    steps:
+    - task: CopyFiles@2
+      displayName: 'Copy Terraform files to artifacts'
+      inputs:
+       SourceFolder: 'Terraform'
+       TargetFolder: '$(Build.artifactstagingdirectory)'  
+
+    - task: PublishBuildArtifacts@1
+      displayName: "Publish Artifact"
+      inputs:
+        pathToPublish: $(Build.ArtifactStagingDirectory)
+        artifactName: "tf-artifact"
+
+- stage: Terraform_Deploy
+  displayName: "Terraform Deployment"
+  jobs:
+  - job: Terraform
+    displayName: "Terraform Install, Init, Plan & Apply"
+    steps:
+#We need to perform the download operation as the first task since the previous work directory will be removed when each job starts.    
+    - task: DownloadPipelineArtifact@2
+      inputs:
+        buildType: 'current'
+        artifactName: 'tf-artifact'
+        targetPath: '$(Build.ArtifactStagingDirectory)'
+
+    - task: TerraformInstaller@1
+      displayName: "Install Terraform"
+      inputs:
+        terraformVersion: $(terraformVersion)
+
+    - script: terraform version
+      displayName: "Verify Terraform Installation"
+
+    - task: TerraformTaskV4@4
+      inputs:
+        provider: 'azurerm'
+        command: 'init'
+        backendServiceArm: 'tfdeploy0316'
+        backendAzureRmResourceGroupName: 'serena-tf-rg'
+        backendAzureRmStorageAccountName: 'serenatfstorage0207'
+        backendAzureRmContainerName: 'tfstate'
+        backendAzureRmKey: '$(backendAzureRmKey)'
+        workingDirectory: '$(Build.artifactstagingdirectory)'
+    
+    - task: TerraformTaskV4@4
+      inputs:
+        provider: 'azurerm'
+        command: 'validate'
+        workingDirectory: '$(Build.artifactstagingdirectory)'
+    
+    - task: TerraformTaskV4@4
+      inputs:
+        provider: 'azurerm'
+        command: 'plan'
+        workingDirectory: '$(Build.artifactstagingdirectory)'
+        environmentServiceNameAzureRM: 'tfdeploy0316'
+    
+    - task: TerraformTaskV4@4
+      inputs:
+        provider: 'azurerm'
+        command: 'apply'
+        workingDirectory: '$(Build.artifactstagingdirectory)'
+        environmentServiceNameAzureRM: 'tfdeploy0316'
+    # - script: terraform apply -auto-approve tfplan
+    #   displayName: "Terraform Apply"
+    #   workingDirectory: $(workingDirectory)
+
+- stage: AddVnetSettings
+  displayName: 'Add Vnet settings'
+  dependsOn: []
+  jobs:
+    - job: InvokeHttpRequest
+      displayName: 'Invoke HTTP Request with Azure CLI'
+      pool:
+        vmImage: 'ubuntu-latest'
+      steps:
+        - task: AzureCLI@2
+          displayName: 'Invoke PATCH Request'
+          inputs:
+            azureSubscription: 'tfdeploy0316'
+            scriptType: 'bash'
+            scriptLocation: 'inlineScript'
+            inlineScript: |
+              az rest --method PATCH \
+                --url https://management.azure.com/subscriptions/797444e4-d923-42a4-9a85-b1176c77adff/resourceGroups/$(deployRG)/providers/Microsoft.Web/sites/$(deployLA)?api-version=2022-03-01 \
+                --body '{ "properties": {"vnetContentShareEnabled": true, "vnetImagePullEnabled": true, "vnetRouteAllEnabled": true, "vnetBackupRestoreEnabled": false}}' \
+                --headers "Content-Type=application/json"
